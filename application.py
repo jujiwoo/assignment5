@@ -117,7 +117,8 @@ class Admin(Base):
     def as_dict(self):
         fields = {}
         for c in self.__table__.columns:
-            fields[c.name] = getattr(self, c.name)
+            if c.name != "password":
+                fields[c.name] = getattr(self, c.name)
         return fields
 
 
@@ -135,7 +136,8 @@ class User(Base):
     def as_dict(self):
         fields = {}
         for c in self.__table__.columns:
-            fields[c.name] = getattr(self, c.name)
+            if c.name != "password":
+                fields[c.name] = getattr(self, c.name)
         return fields
 
 
@@ -277,6 +279,10 @@ class ETL():
 
 etl = ETL()
 
+# Start the ETL process
+p = Process(target=etl.run)
+p.start()
+
 
 # https://stackoverflow.com/questions/19473250/how-to-get-user-email-after-oauth-with-google-api-python-client
 def get_user_info(credentials):
@@ -300,6 +306,12 @@ def credentials_to_dict(credentials):
           'client_secret': credentials.client_secret,
           'scopes': credentials.scopes}
 
+def hash_password(password):
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+def verify_password(password, hashed_password):
+    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+
 
 
 ## Admin REST API
@@ -321,7 +333,7 @@ def add_admin():
         return Response(status, status=400)
     else:
         # 3. Assignment 5: Use bcrypt to encrypt the password.
-        admin = Admin(name=name, password=password)
+        admin = Admin(name=name, password=hash_password(password))
         session.add(admin)
         session.commit()
 
@@ -387,18 +399,12 @@ def add_user():
     password = data['password']
 
     # 4. Assignment 5: Use bcrypt to encrypt the password.
-    newuser = User(name=name, password=password)
+    newuser = User(name=name, password=hash_password(password))
 
     session = DBSession()
-    user = session.query(User).filter_by(name=name).first()
-    if user == None:
-        session.add(newuser)
-        session.commit()
-
-        return newuser.as_dict()
-    else:
-        status = ("User with name {name} already exists.\n").format(name=name)
-        return Response(status, status=400)
+    session.add(newuser)
+    session.commit()
+    return newuser.as_dict()
 
 @app.route("/users")
 def get_users():
@@ -794,6 +800,7 @@ def registercity():
 # 5. Assignment 5: 
 # - Connect the "login-using-google" form with this method
 # - For http methods list in the definition, use POST and GET
+@app.route("/authorize", methods=["GET", "POST"])
 def authorize():
   if not os.path.exists(CLIENT_SECRETS_FILE):
       return render_template('google-oauth-client-secrets-file-missing.html')
@@ -806,13 +813,8 @@ def authorize():
   # for the OAuth 2.0 client, which you configured in the API Console. If this
   # value doesn't match an authorized URI, you will get a 'redirect_uri_mismatch'
   # error.
-  redirect_uri = flask.url_for('oauth2callback', _external=True) # /oauth2callback; https://localhost:5009/oauth2callback
-  parts = redirect_uri.split("/oauth2callback")
-  print(parts)
-  if ":5009" not in redirect_uri:
-    flow.redirect_uri = parts[0] + ":5009/oauth2callback"
-  else:
-    flow.redirect_uri = redirect_uri
+  redirect_uri = flask.url_for('oauth2callback', _external=True)
+  flow.redirect_uri = redirect_uri
   print(flow.redirect_uri)
 
   authorization_url, state = flow.authorization_url(
@@ -820,12 +822,10 @@ def authorize():
       # re-prompting the user for permission. Recommended for web server apps.
       access_type='offline',
       # Enable incremental authorization. Recommended as a best practice.
-      include_granted_scopes='true',
-      code_challenge_method='S256')
+      include_granted_scopes='true')
 
   # Store the state so the callback can verify the auth server response.
   flask.session['state'] = state
-  flask.session['code_verifier'] = flow.code_verifier
   print("Authorization URL:" + authorization_url)
 
   return flask.redirect(authorization_url)
@@ -841,10 +841,8 @@ def oauth2callback():
       CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
   flow.redirect_uri = flask.url_for('oauth2callback', _external=True)
 
-  flow.code_verifier = flask.session['code_verifier']
-
   # Use the authorization server's response to fetch the OAuth 2.0 tokens.
-  authorization_response = flask.request.url # Authorization code
+  authorization_response = flask.request.url
   print("Authorization response:" + authorization_response)
   flow.fetch_token(authorization_response=authorization_response)
 
@@ -854,7 +852,7 @@ def oauth2callback():
   credentials = flow.credentials
   flask.session['credentials'] = credentials_to_dict(credentials)
 
-  return flask.redirect(flask.url_for('login')) # Generate relative URL: /login
+  return flask.redirect(flask.url_for('login'))
 
 
 
@@ -890,18 +888,25 @@ def login():
     app.logger.info("Username:%s", username)
     app.logger.info("Password:%s", password)
 
+    authenticated_user = None
+
     # 5. Assignment 4 - Check if user is present
     if username != '':
         dbsession = DBSession()
-        users = dbsession.query(User).filter_by(name=username)
-        if users.count() == 0:
+        users = dbsession.query(User).filter_by(name=username).all()
+        if len(users) == 0:
             return render_template('not-found.html',user=username)
         else:
             # 6. Assignment 5:
             # - Check that <username, password> exists in the database
             # - Note that password will be encrypted in the DB.
             # - You will have to use bcrypt's checkpw method to check the password.
-            app.logger.info("TODO: Verify the user and password.")
+            for user in users:
+                if user.password and verify_password(password, user.password):
+                    authenticated_user = user
+                    break
+            if authenticated_user == None:
+                return render_template('not-found.html',user=username)
 
     # Load credentials from the session.
     if 'credentials' in flask.session:
@@ -917,6 +922,8 @@ def login():
         # - Leave password empty
 
         flask.session['credentials'] = credentials_to_dict(credentials)
+    elif username == '':
+        return render_template('index.html')
 
     session['username'] = username
 
@@ -928,14 +935,17 @@ def login():
 
     runs = []
     user_cities = []
-    if users.count() > 0:
+    if authenticated_user == None:
         user = users.first()
-        user_cities = get_user_cities(dbsession, user.id)
-    else:
-        user = User(name=username, password=password)
-        dbsession = DBSession()
-        dbsession.add(user)
-        dbsession.commit()
+        if user != None:
+            authenticated_user = user
+        else:
+            user_password = hash_password(password) if password else ''
+            authenticated_user = User(name=username, password=user_password)
+            dbsession.add(authenticated_user)
+            dbsession.commit()
+    if authenticated_user != None:
+        user_cities = get_user_cities(dbsession, authenticated_user.id)
 
     my_cities = []
     if username in in_mem_user_cities:
@@ -965,7 +975,20 @@ def adminlogin():
     app.logger.info("Username:%s", username)
     app.logger.info("Password:%s", password)
 
-    session['username'] = username
+    dbsession = DBSession()
+    admins = dbsession.query(Admin).filter_by(name=username).all()
+    if len(admins) == 0:
+        return render_template('not-found.html',user=username)
+
+    authenticated_admin = None
+    for admin in admins:
+        if admin.password and verify_password(password, admin.password):
+            authenticated_admin = admin
+            break
+    if authenticated_admin == None:
+        return render_template('not-found.html',user=username)
+
+    session['username'] = authenticated_admin.name
 
     user_cities = in_mem_cities
     return render_template('welcome.html',
@@ -987,9 +1010,4 @@ if __name__ == "__main__":
 
     app.debug = False
     app.logger.info('Portal started...')
-
-    # Start the ETL process
-    p = Process(target=etl.run)
-    p.start()
-
     app.run(host='0.0.0.0', port=5009, ssl_context='adhoc')

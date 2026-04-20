@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv_test/
+*.egg-info/
+dist/
+build/
+
+# Local runtime / DB
+*.db
+*.log
+data/
+
+# Cursor / editor agent (do not ship to repo)
+.cursor/
+**/*cursoragent*/
+*cursoragent*
