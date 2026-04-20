@@ -13,6 +13,7 @@ import secrets
 import base64
 import json
 import os
+from urllib.parse import urljoin
 
 import time
 import logging
@@ -45,7 +46,9 @@ os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'
 
 app = Flask(__name__)
 
-app.secret_key = secrets.token_hex() 
+# Stable secret across restarts so OAuth round-trip keeps the session cookie valid.
+# On EC2: export FLASK_SECRET_KEY="$(openssl rand -hex 32)" before python3 application.py
+app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
 
 
 from sqlalchemy import create_engine
@@ -811,6 +814,21 @@ def registercity():
                 status_style="display:block;")
 
 
+def _oauth_redirect_uri():
+    """Exact redirect_uri registered in Google Cloud (scheme + host + port + /oauth2callback).
+
+    Optional override (must match browser URL you use):
+      export OAUTH_PUBLIC_BASE_URL='https://ec2-xx.region.compute.amazonaws.com:5009'
+
+    Default uses request.url_root so it matches the actual https:// host the user hit
+    (avoids invalid_grant when url_for would use http:// behind TLS).
+    """
+    base = os.environ.get("OAUTH_PUBLIC_BASE_URL", "").strip().rstrip("/")
+    if base:
+        return base + "/oauth2callback"
+    return urljoin(flask.request.url_root, "oauth2callback")
+
+
 # Assignment 5: Google OAuth entry (index.html form targets this route).
 @app.route("/authorize", methods=["GET", "POST"])
 def authorize():
@@ -825,7 +843,7 @@ def authorize():
   # for the OAuth 2.0 client, which you configured in the API Console. If this
   # value doesn't match an authorized URI, you will get a 'redirect_uri_mismatch'
   # error.
-  redirect_uri = flask.url_for('oauth2callback', _external=True)
+  redirect_uri = _oauth_redirect_uri()
   flow.redirect_uri = redirect_uri
   print(flow.redirect_uri)
 
@@ -838,6 +856,10 @@ def authorize():
 
   # Store the state so the callback can verify the auth server response.
   flask.session['state'] = state
+  # PKCE: google-auth-oauthlib may add code_challenge to the auth URL; token
+  # exchange requires the same code_verifier on the callback Flow instance.
+  if getattr(flow, 'code_verifier', None):
+    flask.session['code_verifier'] = flow.code_verifier
   print("Authorization URL:" + authorization_url)
 
   return flask.redirect(authorization_url)
@@ -847,22 +869,31 @@ def authorize():
 def oauth2callback():
   # Specify the state when creating the flow in the callback so that it can
   # verified in the authorization server response.
-  state = flask.session['state']
+  state = flask.session.get('state')
+  if state is None:
+    app.logger.error('OAuth callback: missing session state (restart app mid-login or cookie blocked).')
+    return flask.redirect(flask.url_for('index'))
 
-  flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
-      CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
-  flow.redirect_uri = flask.url_for('oauth2callback', _external=True)
+  try:
+    flow = google_auth_oauthlib.flow.Flow.from_client_secrets_file(
+        CLIENT_SECRETS_FILE, scopes=SCOPES, state=state)
+    flow.redirect_uri = _oauth_redirect_uri()
+    cv = flask.session.get('code_verifier')
+    if cv:
+      flow.code_verifier = cv
 
-  # Use the authorization server's response to fetch the OAuth 2.0 tokens.
-  authorization_response = flask.request.url
-  print("Authorization response:" + authorization_response)
-  flow.fetch_token(authorization_response=authorization_response)
+    # Use the authorization server's response to fetch the OAuth 2.0 tokens.
+    authorization_response = flask.request.url
+    print("Authorization response:" + authorization_response)
+    flow.fetch_token(authorization_response=authorization_response)
+    flask.session.pop('code_verifier', None)
 
-  # Store credentials in the session.
-  # In a production app, you likely want to save these
-  # credentials in a persistent database instead.
-  credentials = flow.credentials
-  flask.session['credentials'] = credentials_to_dict(credentials)
+    # Store credentials in the session.
+    credentials = flow.credentials
+    flask.session['credentials'] = credentials_to_dict(credentials)
+  except Exception as e:
+    app.logger.exception('OAuth callback failed: %s', e)
+    return flask.redirect(flask.url_for('index'))
 
   return flask.redirect(flask.url_for('login'))
 
