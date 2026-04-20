@@ -12,6 +12,9 @@ build/
 *.log
 data/
 
+# OAuth — never commit (copy from template locally)
+google_oauth_client_secret.json
+
 # Cursor / editor agent (do not ship to repo)
 .cursor/
 **/*cursoragent*/

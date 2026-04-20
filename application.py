@@ -15,6 +15,7 @@ import json
 import os
 
 import time
+import logging
 import bcrypt
 
 
@@ -26,6 +27,7 @@ from multiprocessing import Process
 import google.oauth2.credentials
 import google_auth_oauthlib.flow
 import googleapiclient.discovery
+from googleapiclient import errors
 
 # This variable specifies the name of a file that contains the OAuth 2.0
 # information for this application, including its client_id and client_secret.
@@ -284,6 +286,10 @@ p = Process(target=etl.run)
 p.start()
 
 
+class NoUserIdException(Exception):
+    """Raised when Google userinfo cannot be read after OAuth."""
+
+
 # https://stackoverflow.com/questions/19473250/how-to-get-user-email-after-oauth-with-google-api-python-client
 def get_user_info(credentials):
     user_info_service = googleapiclient.discovery.build(API_SERVICE_NAME, API_VERSION, credentials=credentials)
@@ -292,10 +298,9 @@ def get_user_info(credentials):
         user_info = user_info_service.userinfo().get().execute()
     except errors.HttpError as e:
         logging.error('An error occurred: %s', e)
-    if user_info and user_info.get('id'):
+    if user_info and (user_info.get('id') or user_info.get('email')):
         return user_info
-    else:
-        raise NoUserIdException()
+    raise NoUserIdException('Google userinfo response missing id and email')
 
 
 def credentials_to_dict(credentials):
@@ -310,7 +315,12 @@ def hash_password(password):
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 def verify_password(password, hashed_password):
-    return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    if not hashed_password:
+        return False
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed_password.encode("utf-8"))
+    except (ValueError, TypeError):
+        return False
 
 
 
@@ -696,6 +706,8 @@ def addcity():
         username = session['username']
 
     user_cities = in_mem_cities
+    dbsession = DBSession()
+    admin_cities = get_admin_cities(dbsession)
     return render_template('welcome.html',
             welcome_message = "Personal Weather Portal - Admin Panel",
             status_string="Registered city " + city_name + ".",
@@ -781,7 +793,8 @@ def registercity():
                 name=username,
                 status_string="Registered city " + city_name + ".",
                 addButton_style="display:none;",
-                addCityForm_style="display:none;",                
+                addCityForm_style="display:none;",
+                regButton_style="display:inline;",
                 regForm_style="display:none;",
                 status_style="display:block;")
     else:
@@ -793,13 +806,12 @@ def registercity():
                 status_string="Weather data for city " + city_name + " not available.",
                 addButton_style="display:none;",
                 addCityForm_style="display:none;",
+                regButton_style="display:inline;",
                 regForm_style="display:none;",
                 status_style="display:block;")
 
 
-# 5. Assignment 5: 
-# - Connect the "login-using-google" form with this method
-# - For http methods list in the definition, use POST and GET
+# Assignment 5: Google OAuth entry (index.html form targets this route).
 @app.route("/authorize", methods=["GET", "POST"])
 def authorize():
   if not os.path.exists(CLIENT_SECRETS_FILE):
@@ -907,19 +919,27 @@ def login():
                     break
             if authenticated_user == None:
                 return render_template('not-found.html',user=username)
+            # Password login wins; drop stale OAuth session so it cannot override below.
+            flask.session.pop('credentials', None)
 
-    # Load credentials from the session.
-    if 'credentials' in flask.session:
+    # Assignment 5: Google OAuth completes with GET /login after oauth2callback.
+    # Do not run this on POST /login or a successful password login would be overwritten.
+    if 'credentials' in flask.session and request.method == 'GET':
         credentials = google.oauth2.credentials.Credentials(
               **flask.session['credentials'])
 
-        user_email = get_user_info(credentials)['email']
+        try:
+            info = get_user_info(credentials)
+            user_email = info.get('email')
+            if not user_email:
+                app.logger.error('Google userinfo missing email: %s', info)
+                return render_template('index.html')
+        except NoUserIdException as e:
+            app.logger.error('OAuth userinfo failed: %s', e)
+            return render_template('index.html')
+
         print("User email:" + user_email)
         username = user_email
-
-        # Assignment 5: 
-        # - Insert User in the DB
-        # - Leave password empty
 
         flask.session['credentials'] = credentials_to_dict(credentials)
     elif username == '':
@@ -940,7 +960,11 @@ def login():
         if user != None:
             authenticated_user = user
         else:
-            user_password = hash_password(password) if password else ''
+            # Assignment 5: OAuth users have empty password; never bcrypt-hash an empty secret.
+            if 'credentials' in flask.session:
+                user_password = ''
+            else:
+                user_password = hash_password(password) if password else ''
             authenticated_user = User(name=username, password=user_password)
             dbsession.add(authenticated_user)
             dbsession.commit()
@@ -955,6 +979,7 @@ def login():
             cities=user_cities,
             available_cities=admin_cities,
             name=username,
+            status_string="",
             addButton_style="display:none;",
             addCityForm_style="display:none;",
             regButton_style="display:inline;",
@@ -991,10 +1016,13 @@ def adminlogin():
     session['username'] = authenticated_admin.name
 
     user_cities = in_mem_cities
+    admin_cities = get_admin_cities(dbsession)
     return render_template('welcome.html',
             welcome_message = "Personal Weather Portal - Admin Panel",
             cities=user_cities,
+            available_cities=admin_cities,
             name=username,
+            status_string="",
             addButton_style="display:inline;",
             addCityForm_style="display:inline;",
             regButton_style="display:none;",
