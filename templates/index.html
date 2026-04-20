@@ -45,14 +45,13 @@
 
           <button type="submit" class="btn btn-primary">Login</button>
       </form>
-      <!--
-	 Assignment 5:
-	 - Add a horizontal rule
-	 - Add a form with "login-using-google" button
-	 - Connect the form to the "authorize" method in application.py
-      -->
-  </div>
-  <div><h6><a href="https://www.cs.utexas.edu/~devdatta">Contact us</a></h6></div>
+      <!-- Assignment 5: Google OAuth (User only); see /authorize in application.py -->
+      <hr>
+      <form action="/authorize" method="get" class="form-signin">
+        <button type="submit" class="btn btn-danger">Login with Google</button>
+      </form>
+    </div>
+    <div><h6><a href="https://www.cs.utexas.edu/~devdatta">Contact us</a></h6></div>
   </div>
 
   </body>
