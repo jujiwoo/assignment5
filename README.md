@@ -1,6 +1,12 @@
 WRF Web App
 ============
 
+name: Justin Song
+eid: jjs5874
+githubusername: jujiwoo
+app: https://ec2-3-14-85-210.us-east-2.compute.amazonaws.com:5009/
+comments: To run a demo use USER: DemoUser1 PW: DemoUser1
+
 Run 
 ----
 1. python3 -m venv venv
@@ -28,5 +34,4 @@ Try
 Stop
 ----
 1. Ctrl+C in the window where application.py was started
-
 

@@ -86,7 +86,7 @@ dictConfig({
 
 # SQLite Database creation
 Base = declarative_base()
-engine = create_engine("sqlite:///weatherportal.db", echo=True, future=True,connect_args={'check_same_thread': False})
+engine = create_engine("sqlite:///weatherportal.db", echo=False, future=True,connect_args={'check_same_thread': False})
 DBSession = sessionmaker(bind=engine)
 
 
@@ -600,14 +600,35 @@ def get_city_by_name(user_id):
 
 def get_user_cities(dbsession, userid):
     cities = []
+    seen_city_names = set()
     usercities = dbsession.query(UserCity).filter_by(userId=userid)
     for usr in usercities:
         cty_list = dbsession.query(City).filter_by(id=usr.cityId)
         if cty_list.count() == 1:
             cty = cty_list.first()
+            # Remove duplicates in the left-side city list.
+            if cty.name in seen_city_names:
+                continue
+
+            # Only show cities that actually have data for the selected
+            # year/month/weather_params. This prevents empty-chart links.
+            has_data = False
+            if usr.weather_params:
+                for param in usr.weather_params.split(','):
+                    key = usr.year + "-" + usr.month + "-" + param.strip()
+                    param_values = dbsession.query(WeatherParameter).filter_by(
+                        cityId=cty.id, year_month_param=key
+                    )
+                    if param_values.count() > 0 and param_values.first().values != "":
+                        has_data = True
+                        break
+            if not has_data:
+                continue
+
             city = {}
             city['name'] = cty.name
             cities.append(city)
+            seen_city_names.add(cty.name)
     return cities
 
 
